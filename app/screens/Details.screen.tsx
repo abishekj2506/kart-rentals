@@ -1,6 +1,6 @@
 // app/screens/Details.screen.tsx
 
-import React, { useState } from 'react';
+import React, { useEffect, useState } from 'react';
 import {
   View,
   Text,
@@ -8,78 +8,169 @@ import {
   TouchableOpacity,
   StyleSheet,
   ScrollView,
+  ActivityIndicator,
+  Dimensions,
   TextInput,
   Switch,
-  Dimensions,
 } from 'react-native';
+import firestore, {
+  FirebaseFirestoreTypes
+} from '@react-native-firebase/firestore';
+import MaterialCommunityIcons from 'react-native-vector-icons/MaterialCommunityIcons';
 import { colors } from '../theme/colors';
 import { scale } from '../theme/scale';
-import MaterialCommunityIcons from 'react-native-vector-icons/MaterialCommunityIcons';
 import type { NativeStackScreenProps } from '@react-navigation/native-stack';
 import type { NavigatorParamList } from '../navigators/navigation-route';
+import DateTimePicker from '@react-native-community/datetimepicker';
 
 type Props = NativeStackScreenProps<NavigatorParamList, 'DetailsScreen'>;
-const { width, height } = Dimensions.get('window');
+const { width } = Dimensions.get('window');
 
 type Cart = {
   id: string;
-  image: any;
-  label: string;
-  selected: boolean;
+  brand: string;
+  model: string;
+  image_url: string;
+  daily_price: string;
+  passengers: string;
+  battery: string;
+  quantity: number;      // from session
 };
 
-const initialCarts: Cart[] = [
-  { id: '1', image: require('../assets/images/kart1.png'), label: '2-Seater', selected: true },
-  { id: '2', image: require('../assets/images/kart2.png'), label: '4-Seater', selected: true },
-  { id: '3', image: require('../assets/images/kart3.png'), label: '2-Seater', selected: true },
-];
+export default function DetailsScreen({ 
+  route, 
+  navigation 
+}: Props) {
+  const { sessionId } = route.params as { sessionId: string };
+  const [carts, setCarts] = useState<Cart[]>([]);
+  const [loading, setLoading] = useState(true);
 
-export default function DetailsScreen({ navigation }: Props) {
-  const [carts, setCarts] = useState(initialCarts);
-  const [pickUp, setPickUp] = useState('13:30');
-  const [dropOff, setDropOff] = useState('17:30');
+  const [pickUp, setPickUp]     = useState<Date>(new Date());
+  const [dropOff, setDropOff]   = useState<Date>(new Date());
+  const [showPicker, setShowPicker] = useState<{
+    mode: 'date' | 'time';
+    field: 'pickUp' | 'dropOff';
+    visible: boolean;
+  }>({ mode: 'date', field: 'pickUp', visible: false });
   const [sameForAll, setSameForAll] = useState(false);
 
+  // 1️⃣ Load session → get partialBooking.carts
+  useEffect(() => {
+  const docRef = firestore().collection('sessions').doc(sessionId);
+
+  docRef
+    .get()
+    .then(docSnap => {
+      if (!docSnap.exists) {
+        throw new Error('Session not found');
+      }
+
+      const data = docSnap.data() as any;
+
+      // guard against missing partialBooking or carts
+      const cartIds: string[] =
+        Array.isArray(data.partialBooking?.carts)
+          ? data.partialBooking.carts
+          : [];
+
+      // fetch each cart’s details in parallel
+      return Promise.all(
+        cartIds.map(id =>
+          firestore()
+            .collection('carts')
+            .doc(id)
+            .get()
+            .then(cd => {
+              if (!cd.exists) {
+                console.warn(`Cart ${id} not found`);
+                return null;
+              }
+              const d = cd.data()!;
+              return {
+                id: cd.id,
+                brand: d.brand,
+                model: d.model,
+                image_url: d.image_url,
+                daily_price: d.daily_price,
+                passengers: d.passangers || d.passengers || 'N/A',
+                battery: d.battery,
+                quantity: 1, // default if you don't track per-cart qty in session
+              } as Cart | null;
+            })
+        )
+      );
+    })
+    .then(results => {
+      // filter out any nulls (missing carts)
+      const fetched = results.filter((c): c is Cart => c !== null);
+      setCarts(fetched);
+    })
+    .catch(err => console.error('❌ Details load error', err))
+    .finally(() => setLoading(false));
+}, [sessionId]);
+
+
   const toggleCart = (id: string) =>
-    setCarts(cs => cs.map(c => (c.id === id ? { ...c, selected: !c.selected } : c)));
+    setCarts(cs =>
+      cs.map(c => c.id === id ? { ...c, quantity: c.quantity > 0 ? 0 : 1 } : c)
+    );
+
+  const handleSave = () => {
+    // parse pickUp/dropOff into timestamps; here we'll store as strings for simplicity
+    firestore()
+      .collection('sessions')
+      .doc(sessionId)
+      .update({
+        'partialBooking.dates.start': pickUp,
+        'partialBooking.dates.end':   dropOff,
+        updatedAt: firestore.FieldValue.serverTimestamp(),
+      })
+      .then(() => {
+        navigation.navigate('AddOnsScreen', { sessionId });
+      })
+      .catch(err => {
+        console.error('❌ Could not save dates', err);
+        alert('Unable to save, try again');
+      });
+  };
+
+  if (loading) {
+    return (
+      <View style={styles.loader}>
+        <ActivityIndicator size="large" color={colors.primaryDark} />
+      </View>
+    );
+  }
 
   return (
     <View style={styles.container}>
       <ScrollView contentContainerStyle={styles.scrollContent}>
-        <Text style={styles.header}>Select Duration</Text>
+        <Text style={styles.header}>Select Karts & Duration</Text>
 
-        {/* Horizontal carousel of cart images */}
-        <View style={styles.carouselRow}>
-          <TouchableOpacity>
-            <MaterialCommunityIcons name="chevron-left" size={scale(24)} color={colors.textDark} />
-          </TouchableOpacity>
-          <ScrollView
-            horizontal
-            showsHorizontalScrollIndicator={false}
-            contentContainerStyle={styles.carousel}
+        {/* Cart list */}
+        {carts.map(c => (
+          <TouchableOpacity
+            key={c.id}
+            style={styles.cartRow}
+            onPress={() => toggleCart(c.id)}
           >
-            {carts.map(c => (
-              <TouchableOpacity
-                key={c.id}
-                onPress={() => toggleCart(c.id)}
-                style={styles.kartWrapper}
-              >
-                <Image source={c.image} style={styles.kartImage} resizeMode="contain" />
-                {c.selected && (
-                  <View style={styles.check}>
-                    <MaterialCommunityIcons name="check" color={colors.white} size={scale(16)} />
-                  </View>
-                )}
-                <Text style={styles.kartLabel}>{c.label}</Text>
-              </TouchableOpacity>
-            ))}
-          </ScrollView>
-          <TouchableOpacity>
-            <MaterialCommunityIcons name="chevron-right" size={scale(24)} color={colors.textDark} />
+            <Image source={{ uri: c.image_url }} style={styles.cartImage} />
+            <View style={styles.cartInfo}>
+              <Text style={styles.cartTitle}>{c.brand} {c.model}</Text>
+              <Text>{c.passengers}-seater · Battery {c.battery}</Text>
+              <Text>${c.daily_price} / day</Text>
+            </View>
+            {c.quantity > 0 && (
+              <MaterialCommunityIcons
+                name="check-circle"
+                size={24}
+                color={colors.primaryDark}
+              />
+            )}
           </TouchableOpacity>
-        </View>
+        ))}
 
-        {/* Time pickers — full width with calendar icon */}
+        {/* Time pickers */}
         <View style={styles.timeGroupFull}>
           <Text style={styles.timeLabel}>Pick-up Time</Text>
           <View style={styles.inputWithIcon}>
@@ -90,7 +181,11 @@ export default function DetailsScreen({ navigation }: Props) {
               placeholderTextColor={colors.grayLight}
               style={styles.timeInput}
             />
-            <MaterialCommunityIcons name="calendar" size={scale(20)} color={colors.grayLight} />
+            <MaterialCommunityIcons
+              name="calendar"
+              size={scale(20)}
+              color={colors.grayLight}
+            />
           </View>
         </View>
 
@@ -104,16 +199,61 @@ export default function DetailsScreen({ navigation }: Props) {
               placeholderTextColor={colors.grayLight}
               style={styles.timeInput}
             />
-            <MaterialCommunityIcons name="calendar" size={scale(20)} color={colors.grayLight} />
+            <MaterialCommunityIcons
+              name="calendar"
+              size={scale(20)}
+              color={colors.grayLight}
+            />
           </View>
-        </View>
-
-        {/* Same duration toggle */}
-        <View style={styles.toggleRow}>
-          <TouchableOpacity onPress={() => navigation.goBack()}>
-            <MaterialCommunityIcons name="chevron-left" size={scale(24)} color={colors.textDark} />
+        </View> 
+        {/* <View style={styles.timeGroupFull}>
+          <Text style={styles.timeLabel}>Pick-up</Text>
+          <TouchableOpacity
+            style={styles.inputWithIcon}
+            onPress={() => setShowPicker({ mode: 'date', field: 'pickUp', visible: true })}
+          >
+            <Text style={styles.timeInput}>
+              {pickUp.toLocaleString()}
+            </Text>
+            <MaterialCommunityIcons name="calendar" size={scale(20)} color={colors.grayLight} />
           </TouchableOpacity>
-          <Text style={styles.toggleLabel}>Same Duration for others</Text>
+        </View> */}
+
+        {/* Drop-off */}
+        {/* <View style={styles.timeGroupFull}>
+          <Text style={styles.timeLabel}>Drop-off</Text>
+          <TouchableOpacity
+            style={styles.inputWithIcon}
+            onPress={() => setShowPicker({ mode: 'date', field: 'dropOff', visible: true })}
+          >
+            <Text style={styles.timeInput}>
+              {dropOff.toLocaleString()}
+            </Text>
+            <MaterialCommunityIcons name="calendar" size={scale(20)} color={colors.grayLight} />
+          </TouchableOpacity>
+        </View> */}
+
+        {/* The actual DateTimePicker */}
+        {/* {showPicker.visible && (
+          <DateTimePicker
+            value={ showPicker.field === 'pickUp' ? pickUp : dropOff }
+            mode={showPicker.mode}
+            is24Hour={true}
+            display="default"
+            onChange={(_, selected) => {
+              // when the user selects a date/time or dismisses:
+              setShowPicker(s => ({ ...s, visible: false }));
+              if (selected) {
+                if (showPicker.field === 'pickUp') setPickUp(selected);
+                else setDropOff(selected);
+              }
+            }}
+          />
+        )} */}
+
+        {/* Same for all toggle */}
+        <View style={styles.toggleRow}>
+          <Text style={styles.toggleLabel}>Same Duration for all</Text>
           <Switch
             value={sameForAll}
             onValueChange={setSameForAll}
@@ -121,144 +261,35 @@ export default function DetailsScreen({ navigation }: Props) {
             thumbColor={colors.white}
           />
         </View>
-
-        {/* Pagination dots just above the save button */}
-        <View style={styles.dotsRowInline}>
-          {[0, 1, 2, 3].map(i => (
-            <View
-              key={i}
-              style={[
-                styles.dot,
-                i === 2 && { backgroundColor: colors.primaryDark },
-              ]}
-            />
-          ))}
-        </View>
       </ScrollView>
 
-      {/* Save button pinned to bottom */}
-      <TouchableOpacity
-        style={styles.saveBtn}
-        onPress={() => navigation.navigate('AddOnsScreen')}
-      >
-        <Text style={styles.saveText}>Save</Text>
+      {/* Save button */}
+      <TouchableOpacity style={styles.saveBtn} onPress={handleSave}>
+        <Text style={styles.saveText}>Save & Continue</Text>
       </TouchableOpacity>
     </View>
   );
 }
 
 const styles = StyleSheet.create({
-  container: {
-    flex: 1,
-    backgroundColor: colors.backgroundLight,
-  },
+  container: { flex:1, backgroundColor: colors.backgroundLight },
+  loader:    { flex:1, alignItems:'center', justifyContent:'center' },
+  scrollContent: { padding: scale(16), paddingBottom: scale(100) },
+  header:    { fontSize:scale(18), fontWeight:'600', color:colors.primaryDark, marginBottom:scale(12) },
 
-  scrollContent: {
-    paddingTop: scale(16),
-    paddingHorizontal: scale(16),
-    paddingBottom: scale(100), // enough to scroll above the pinned button
-  },
+  cartRow:   { flexDirection:'row', alignItems:'center', padding:scale(12), backgroundColor:colors.white, marginBottom:scale(8), borderRadius:scale(8) },
+  cartImage: { width:scale(80), height:scale(60), marginRight:scale(12), backgroundColor:colors.grayLightest },
+  cartInfo:  { flex:1 },
+  cartTitle: { fontWeight:'600', marginBottom:4 },
 
-  header: {
-    fontSize: scale(18),
-    fontWeight: '600',
-    color: colors.primaryDark,
-    marginBottom: scale(12),
-  },
+  timeGroupFull: { marginBottom: scale(20) },
+  timeLabel:     { fontSize: scale(14), marginBottom: scale(8) },
+  inputWithIcon: { flexDirection:'row', alignItems:'center', backgroundColor:colors.white, borderRadius:scale(6), padding:scale(12) },
+  timeInput:     { flex:1, fontSize:scale(16), color:colors.textDark, padding:0 },
 
-  carouselRow: {
-    flexDirection: 'row',
-    alignItems: 'center',
-    marginBottom: scale(24),
-  },
-  carousel: {
-    paddingHorizontal: scale(8),
-  },
-  kartWrapper: {
-    width: width * 0.3,
-    alignItems: 'center',
-    marginHorizontal: scale(8),
-  },
-  kartImage: {
-    width: '100%',
-    height: scale(80),
-    backgroundColor: colors.grayLightest,
-  },
-  check: {
-    position: 'absolute',
-    top: scale(4),
-    right: scale(4),
-    backgroundColor: colors.primaryDark,
-    borderRadius: scale(8),
-    padding: scale(2),
-  },
-  kartLabel: {
-    marginTop: scale(4),
-    fontSize: scale(12),
-    color: colors.textDark,
-  },
+  toggleRow:   { flexDirection:'row', alignItems:'center', marginBottom:scale(24) },
+  toggleLabel: { flex:1, fontSize:scale(14), color:colors.textDark },
 
-  timeGroupFull: {
-    marginBottom: scale(20),
-  },
-  timeLabel: {
-    fontSize: scale(14),
-    color: colors.textDark,
-    marginBottom: scale(8),
-  },
-  inputWithIcon: {
-    flexDirection: 'row',
-    alignItems: 'center',
-    backgroundColor: colors.white,
-    borderRadius: scale(6),
-    paddingHorizontal: scale(12),
-    paddingVertical: scale(10),
-  },
-  timeInput: {
-    flex: 1,
-    fontSize: scale(16),
-    color: colors.textDark,
-    padding: 0,
-    margin: 0,
-  },
-
-  toggleRow: {
-    flexDirection: 'row',
-    alignItems: 'center',
-    marginBottom: scale(24),
-  },
-  toggleLabel: {
-    flex: 1,
-    marginLeft: scale(8),
-    fontSize: scale(14),
-    color: colors.textDark,
-  },
-
-  dotsRowInline: {
-    flexDirection: 'row',
-    justifyContent: 'center',
-    marginBottom: scale(16),
-  },
-  dot: {
-    width: scale(8),
-    height: scale(8),
-    borderRadius: scale(4),
-    backgroundColor: colors.grayLight,
-    marginHorizontal: scale(4),
-  },
-
-  saveBtn: {
-    position: 'absolute',
-    bottom: 0,
-    left: 0,
-    right: 0,
-    backgroundColor: colors.primaryDark,
-    paddingVertical: scale(16),
-    alignItems: 'center',
-  },
-  saveText: {
-    color: colors.white,
-    fontSize: scale(16),
-    fontWeight: '600',
-  },
+  saveBtn:    { position:'absolute', bottom:0, left:0, right:0, backgroundColor:colors.primaryDark, padding:scale(16), alignItems:'center' },
+  saveText:   { color:colors.white, fontSize:scale(16), fontWeight:'600' },
 });

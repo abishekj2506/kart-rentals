@@ -1,20 +1,197 @@
 // app/screens/AddOns.screen.tsx
-import React from 'react';
+import React, { useEffect, useState } from 'react';
 import {
   View,
   Text,
   StyleSheet,
   TouchableOpacity,
   Dimensions,
+  ActivityIndicator,
+  Switch,
+  FlatList,
+  Alert,
 } from 'react-native';
 import MaterialCommunityIcons from 'react-native-vector-icons/MaterialCommunityIcons';
+import firestore from '@react-native-firebase/firestore';
 import { colors } from '../theme/colors';
 import { scale } from '../theme/scale';
 import type { NativeStackScreenProps } from '@react-navigation/native-stack';
 import type { NavigatorParamList } from '../navigators/navigation-route';
+
 const { width } = Dimensions.get('window');
+
 type Props = NativeStackScreenProps<NavigatorParamList, 'AddOnsScreen'>;
-export default function AddOnsScreen({ navigation }: Props) {
+
+type AddOn = {
+  label: string;
+  selected: boolean;
+};
+
+export default function AddOnsScreen({ navigation, route }: Props) {
+  // grab sessionId from route params
+  const { sessionId } = (route.params || {}) as { sessionId?: string };
+
+  const [loading, setLoading] = useState(true);
+  const [addons, setAddons] = useState<AddOn[]>([]);
+
+  useEffect(() => {
+    if (!sessionId) {
+      Alert.alert('Missing session', 'No sessionId was provided to Add-Ons screen.');
+      setLoading(false);
+      return;
+    }
+
+    let cancelled = false;
+
+    const parseAddonsField = (raw: any): string[] => {
+      if (!raw) return [];
+      // direct array
+      if (Array.isArray(raw)) return raw.map(String).map(s => s.trim()).filter(Boolean);
+
+      // object with keys? try values
+      if (typeof raw === 'object') {
+        return Object.values(raw).map(String).map(s => s.trim()).filter(Boolean);
+      }
+
+      // string: try to parse JSON first (in some docs it's stored as "['A','B']")
+      if (typeof raw === 'string') {
+        const s = raw.trim();
+        try {
+          // attempt JSON parse if it's valid JSON
+          const p = JSON.parse(s);
+          if (Array.isArray(p)) return p.map(String).map(i => i.trim()).filter(Boolean);
+        } catch (e) {
+          // not valid JSON, fall through to manual parse
+        }
+
+        // remove surrounding [] if present and split on commas
+        const stripped = s.replace(/^\[|\]$/g, '').trim();
+        if (!stripped) return [];
+        // split by comma, remove surrounding quotes/spaces
+        return stripped
+          .split(',')
+          .map(x => x.replace(/^["']|["']$/g, '').trim())
+          .filter(Boolean);
+      }
+
+      return [];
+    };
+
+    const load = async () => {
+      try {
+        const db = firestore();
+        const sessionSnap = await db.collection('sessions').doc(sessionId).get();
+        if (!sessionSnap.exists) {
+          throw new Error('Session not found');
+        }
+        const sessionData = sessionSnap.data() as any;
+        const partial = sessionData?.partialBooking || {};
+        const cartIds: string[] = Array.isArray(partial?.carts) ? partial.carts : [];
+
+        // Parse any previously saved addons from session (handles array / object / string)
+        const existingAddons = parseAddonsField(partial?.addons);
+
+        if (cartIds.length === 0) {
+          // no carts selected — still show previously saved addons (preselected)
+          if (!cancelled) {
+            const listFromSession = Array.from(new Set(existingAddons)).map(label => ({
+              label,
+              selected: true,
+            }));
+            setAddons(listFromSession);
+          }
+          return;
+        }
+
+        // fetch cart docs
+        const cartDocs = await Promise.all(
+          cartIds.map(id => db.collection('carts').doc(id).get())
+        );
+
+        const setOfAddons = new Set<string>();
+        for (const cd of cartDocs) {
+          if (!cd.exists) continue;
+          const d = cd.data() as any;
+
+          // try multiple potential field names
+          const candidates = [
+            d['Add-ons'],
+            d['addons'],
+            d['addOns'],
+            d['add_ons'],
+            d['AddOns'],
+          ];
+
+          for (const cand of candidates) {
+            const parsed = parseAddonsField(cand);
+            parsed.forEach(a => setOfAddons.add(a));
+          }
+        }
+
+        // union with existingAddons (so previously saved addons are preserved)
+        existingAddons.forEach(a => setOfAddons.add(a));
+
+        if (!cancelled) {
+          const list = Array.from(setOfAddons).map(label => ({
+            label,
+            selected: existingAddons.includes(label), // preselect if stored in session
+          }));
+          setAddons(list);
+        }
+      } catch (err: any) {
+        console.error('❌ AddOns load error', err);
+        Alert.alert('Error loading add-ons', err.message || String(err));
+      } finally {
+        if (!cancelled) setLoading(false);
+      }
+    };
+
+    load();
+
+    return () => {
+      cancelled = true;
+    };
+  }, [sessionId]);
+
+  const toggle = (label: string) => {
+    setAddons(a => a.map(x => (x.label === label ? { ...x, selected: !x.selected } : x)));
+  };
+
+  const onSave = async () => {
+    if (!sessionId) {
+      Alert.alert('Missing session', 'No sessionId available');
+      return;
+    }
+    const selected = addons.filter(a => a.selected).map(a => a.label);
+    try {
+      setLoading(true);
+      const db = firestore();
+      await db
+        .collection('sessions')
+        .doc(sessionId)
+        .set(
+          { partialBooking: { addons: selected } },
+          { merge: true } // merge so we don't overwrite other partialBooking fields
+        );
+
+      // navigate to review, passing sessionId
+      navigation.navigate('ReviewScreen', { sessionId });
+    } catch (err: any) {
+      console.error('❌ AddOns save error', err);
+      Alert.alert('Save failed', err.message || 'Please try again');
+    } finally {
+      setLoading(false);
+    }
+  };
+
+  if (loading) {
+    return (
+      <View style={styles.loader}>
+        <ActivityIndicator size="large" color={colors.primaryDark} />
+      </View>
+    );
+  }
+
   return (
     <View style={styles.container}>
       {/* Header */}
@@ -30,17 +207,34 @@ export default function AddOnsScreen({ navigation }: Props) {
         <View style={{ width: scale(24) }} />
       </View>
 
-      {/* Empty content area */}
+      {/* Content */}
       <View style={styles.content}>
-        <Text style={styles.placeholderText}>
-          (No add-ons available yet)
-        </Text>
+        {addons.length === 0 ? (
+          <Text style={styles.placeholderText}>(No add-ons available for the selected karts)</Text>
+        ) : (
+          <FlatList
+            data={addons}
+            keyExtractor={(it) => it.label}
+            contentContainerStyle={{ paddingHorizontal: scale(16) }}
+            renderItem={({ item }) => (
+              <View style={styles.addonRow}>
+                <Text style={styles.addonLabel}>{item.label}</Text>
+                <Switch
+                  value={item.selected}
+                  onValueChange={() => toggle(item.label)}
+                  trackColor={{ true: colors.primaryDark, false: colors.grayLightest }}
+                  thumbColor={colors.white}
+                />
+              </View>
+            )}
+          />
+        )}
       </View>
 
-      {/* Save button */}
+      {/* Save button → pass sessionId along */}
       <TouchableOpacity
         style={styles.saveBtn}
-        onPress={() => navigation.navigate('ReviewScreen')}
+        onPress={onSave}
       >
         <Text style={styles.saveText}>Save</Text>
       </TouchableOpacity>
@@ -52,7 +246,7 @@ export default function AddOnsScreen({ navigation }: Props) {
             key={i}
             style={[
               styles.dot,
-              i === 3 && { backgroundColor: colors.grayLight }, // last page inactive
+              i === 3 && { backgroundColor: colors.grayLight },
             ]}
           />
         ))}
@@ -77,11 +271,11 @@ const styles = StyleSheet.create({
   content: {
     flex: 1,
     justifyContent: 'center',
-    alignItems: 'center',
   },
   placeholderText: {
     fontSize: scale(14),
     color: colors.grayLight,
+    textAlign: 'center',
   },
   saveBtn: {
     backgroundColor: colors.primaryDark,
@@ -106,5 +300,21 @@ const styles = StyleSheet.create({
     borderRadius: scale(4),
     backgroundColor: colors.primaryDark,
     marginHorizontal: scale(4),
+  },
+
+  loader: { flex: 1, alignItems: 'center', justifyContent: 'center' },
+
+  addonRow: {
+    flexDirection: 'row',
+    justifyContent: 'space-between',
+    alignItems: 'center',
+    backgroundColor: colors.white,
+    padding: scale(12),
+    borderRadius: scale(8),
+    marginBottom: scale(10),
+  },
+  addonLabel: {
+    fontSize: scale(14),
+    color: colors.textDark,
   },
 });

@@ -11,6 +11,7 @@ import {
   Platform,
   ActivityIndicator,
   Alert,
+  Image,
 } from 'react-native';
 import auth from '@react-native-firebase/auth';
 import firestore from '@react-native-firebase/firestore';
@@ -58,7 +59,10 @@ export default function RegistrationScreen() {
       resizeMode="cover"
     >
       <View style={styles.container}>
-        <Text style={styles.title}>Golf Kart Booking</Text>
+        <Image
+          source={require('../assets/images/brand/Logo_black.png')}
+          style={styles.logo}
+        />
 
         <Text style={styles.subtitle}>Create an account</Text>
         <Text style={styles.helperText}>
@@ -132,6 +136,12 @@ export default function RegistrationScreen() {
 }
 
 const styles = StyleSheet.create({
+  logo: {
+    width: '100%',
+    height: 100,
+    resizeMode: 'contain',
+    alignSelf: 'center',
+  },
   bg: {
     flex: 1,
     backgroundColor: colors.primaryDark,
